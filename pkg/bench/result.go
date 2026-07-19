@@ -9,8 +9,9 @@ import (
 
 // SchemaVersion is the results.json format version. A reader rejects a file from a
 // newer schema rather than silently misreading it, the same contract unagi's own
-// build report uses.
-const SchemaVersion = 1
+// build report uses. Version 2 added the peak-RSS memory statistics and the run
+// scope fields (Discovered/Filter).
+const SchemaVersion = 2
 
 // Goal is the campaign target: unagi should run at least this many times faster
 // than the fastest competitor on the provable subset. It is reported against, not
@@ -21,12 +22,23 @@ const Goal = 2.0
 // and one record per workload. It is schema-versioned so a stored run stays
 // readable as the format grows.
 type Results struct {
-	Schema    int                   `json:"schema"`
-	Machine   Machine               `json:"machine"`
-	Engines   map[string]EngineInfo `json:"engines"`
-	Reps      int                   `json:"reps"`
-	Warmup    int                   `json:"warmup"`
-	Workloads []WorkloadResult      `json:"workloads"`
+	Schema     int                   `json:"schema"`
+	Machine    Machine               `json:"machine"`
+	Engines    map[string]EngineInfo `json:"engines"`
+	Reps       int                   `json:"reps"`
+	Warmup     int                   `json:"warmup"`
+	Discovered int                   `json:"discovered,omitempty"` // workloads found before the filter
+	Filter     string                `json:"filter,omitempty"`     // the name filter this run applied, empty for a full run
+	Workloads  []WorkloadResult      `json:"workloads"`
+}
+
+// Partial reports whether this run covered only a subset of the discovered
+// workloads, either because a name filter was applied or because fewer workloads
+// ran than were found. A partial run's aggregate is still meaningful but the
+// report labels it so a subset speedup is never mistaken for the whole-suite
+// figure.
+func (r Results) Partial() bool {
+	return r.Filter != "" || (r.Discovered > 0 && len(r.Workloads) < r.Discovered)
 }
 
 // Machine records where a run happened, so two result files are only compared when
@@ -56,16 +68,30 @@ type WorkloadResult struct {
 	Engines map[string]Measure `json:"engines"`
 }
 
-// Measure is one engine's result on one workload: its timing statistics, whether
-// its output matched the oracle, and a skip reason when it could not run.
+// Measure is one engine's result on one workload: its wall-time, compute-time and
+// peak-memory statistics, how it compares to CPython on each, whether its output
+// matched the oracle, and a skip reason when it could not run.
+//
+// Stats is wall time: the whole process from exec to exit, the end-to-end cost a
+// user feels. Compute is the in-script cost the program self-reports through an
+// injected timer around its module body, so it isolates the work the program did
+// from the fixed per-process overhead (interpreter startup for CPython, Go-runtime
+// init and the unagi build for a compiled binary). ComputeOK says whether every
+// repetition reported a timer reading.
 type Measure struct {
-	Engine           string  `json:"engine"`
-	OK               bool    `json:"ok"`
-	Skip             string  `json:"skip,omitempty"`
-	Mismatch         bool    `json:"mismatch,omitempty"`
-	Output           string  `json:"output,omitempty"`
-	Stats            stats   `json:"stats"`
-	SpeedupVsCPython float64 `json:"speedupVsCpython,omitempty"`
+	Engine    string   `json:"engine"`
+	OK        bool     `json:"ok"`
+	Skip      string   `json:"skip,omitempty"`
+	Mismatch  bool     `json:"mismatch,omitempty"`
+	Output    string   `json:"output,omitempty"`
+	Stats     stats    `json:"stats"` // wall time
+	Compute   stats    `json:"compute,omitzero"`
+	ComputeOK bool     `json:"computeOk,omitempty"`
+	Mem       memStats `json:"mem"`
+
+	SpeedupVsCPython        float64 `json:"speedupVsCpython,omitempty"`        // CPython median wall / ours, >1 is faster
+	ComputeSpeedupVsCPython float64 `json:"computeSpeedupVsCpython,omitempty"` // CPython median compute / ours, >1 is faster
+	MemRatioVsCPython       float64 `json:"memRatioVsCpython,omitempty"`       // CPython median peak RSS / ours, >1 is leaner
 }
 
 // thisMachine captures the current host for a results header.
